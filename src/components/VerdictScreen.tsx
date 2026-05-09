@@ -8,6 +8,12 @@ export type VerdictScreenProps = {
   onRestart: () => void
 }
 
+const verdictDuckSrc = {
+  merge_approved: '/generated-assets/duck-states/duck-approved.png',
+  conditional_merge: '/generated-assets/duck-states/duck-warning.png',
+  merge_denied: '/generated-assets/duck-states/duck-denied.png',
+} satisfies Record<VerdictResponse['verdict'], string>
+
 export function VerdictScreen({ verdict, onRestart }: VerdictScreenProps) {
   const [copied, setCopied] = useState(false)
 
@@ -19,15 +25,20 @@ export function VerdictScreen({ verdict, onRestart }: VerdictScreenProps) {
   return (
     <section className="verdict-screen" data-testid="verdict-screen">
       <div className={`verdict-card verdict-${verdict.verdict}`}>
-        <p className="eyebrow">Review result</p>
-        <h2>{verdict.headline}</h2>
-        <p>
-          {verdict.verdict === 'merge_approved'
-            ? 'The pull request is understood well enough to move forward.'
-            : verdict.verdict === 'conditional_merge'
-              ? 'You understand part of the risk, but one answer still needs support.'
-              : 'Pause before merging until the risky parts can be explained clearly.'}
-        </p>
+        <div className="verdict-card-copy">
+          <p className="eyebrow">Review result</p>
+          <h2>{verdict.headline}</h2>
+          <p>
+            {verdict.verdict === 'merge_approved'
+              ? 'The pull request is understood well enough to move forward.'
+              : verdict.verdict === 'conditional_merge'
+                ? 'You understand part of the risk, but one answer still needs support.'
+                : 'Pause before merging until the risky parts can be explained clearly.'}
+          </p>
+        </div>
+        <div className="verdict-duck-stage" aria-hidden="true">
+          <img src={verdictDuckSrc[verdict.verdict]} width={220} height={220} alt="" />
+        </div>
       </div>
 
       <div className="verdict-columns">

@@ -3,6 +3,11 @@ import viteReact from '@vitejs/plugin-react'
 import { nitro } from 'nitro/vite'
 import { defineConfig } from 'vite'
 
-export default defineConfig({
-  plugins: [tanstackStart(), nitro({ preset: 'vercel' }), viteReact()],
+export default defineConfig(({ command }) => ({
+  plugins: [
+    tanstackStart(),
+    command === 'build' ? nitro({ preset: 'vercel' }) : null,
+    viteReact(),
+  ],
 })
+)

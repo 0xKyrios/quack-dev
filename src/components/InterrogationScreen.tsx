@@ -38,6 +38,10 @@ const transcriptSpeakerLabels: Record<TranscriptLine['speaker'], string> = {
 }
 
 const checkingStatusText = 'quack dev is checking your answer against the review summary.'
+const duckMascotSrc = '/generated-assets/rubber-duck-mascot.png'
+const duckListeningSrc = '/generated-assets/duck-states/duck-listening.png'
+const duckSpeakingSrc = '/generated-assets/duck-states/duck-speaking.png'
+const duckThinkingSrc = '/generated-assets/duck-states/duck-thinking.png'
 
 export type InterrogationScreenProps = {
   chargeSheet: ChargeSheet
@@ -81,6 +85,21 @@ export function InterrogationScreen({
   isLoading,
 }: InterrogationScreenProps) {
   const voiceSessionActive = answerMode === 'voice' && (voiceState === 'connecting' || voiceState === 'live')
+  const latestDuckLine = [...transcript].reverse().find((line) => line.speaker === 'duck')
+  const duckIsSpeaking = Boolean(latestDuckLine) && !isEvaluating && !(answerMode === 'voice' && voiceState === 'live')
+  const activeDuckSrc = isEvaluating
+    ? duckThinkingSrc
+    : answerMode === 'voice' && voiceState === 'live'
+      ? duckListeningSrc
+      : duckIsSpeaking
+        ? duckSpeakingSrc
+        : duckMascotSrc
+  const duckStageClass = [
+    'duck-conversation-stage',
+    voiceSessionActive ? 'duck-conversation-stage-live' : '',
+    duckIsSpeaking ? 'duck-conversation-stage-speaking' : '',
+    isEvaluating ? 'duck-conversation-stage-thinking' : '',
+  ].filter(Boolean).join(' ')
 
   return (
     <section className="interrogation-grid interrogation-grid-has-fixed-bar">
@@ -108,21 +127,13 @@ export function InterrogationScreen({
               className={`duck-avatar-wrap ${voiceSessionActive ? 'duck-voice-active' : ''}`}
               aria-hidden="true"
             >
-              {answerMode === 'voice' ? (
-                <img
-                  className="duck-mascot"
-                  src="/duck.svg"
-                  width={88}
-                  height={88}
-                  alt=""
-                />
-              ) : (
-                <div className="duck-avatar">
-                  <div className="duck-head" />
-                  <div className="duck-beak" />
-                  <div className="duck-eye" />
-                </div>
-              )}
+              <img
+                className="duck-mascot"
+                src={activeDuckSrc}
+                width={88}
+                height={88}
+                alt=""
+              />
             </div>
             <div>
               <p className="eyebrow">Understanding check</p>
@@ -156,6 +167,29 @@ export function InterrogationScreen({
         </div>
 
         <div className="chat-scroll">
+          <div className={duckStageClass}>
+            <div className="duck-stage-orbit" aria-hidden="true">
+              <img
+                className="duck-stage-mascot"
+                src={activeDuckSrc}
+                width={180}
+                height={180}
+                alt=""
+              />
+            </div>
+            <div className="duck-stage-copy">
+              <div className="duck-stage-meta">
+                <span>quack dev</span>
+                <span>{answerMode === 'voice' ? voiceStateLabels[voiceState] : 'Text chat'}</span>
+              </div>
+              <p>
+                {latestDuckLine?.text ||
+                  currentConcept?.question ||
+                  'Answer the pinned question to start talking with the duck.'}
+              </p>
+            </div>
+          </div>
+
           <div className="transcript-panel">
             <p className="eyebrow">Conversation</p>
             <p className="transcript-panel-hint">Questions, answers, and model feedback in one thread.</p>

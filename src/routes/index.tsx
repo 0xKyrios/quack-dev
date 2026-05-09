@@ -24,10 +24,11 @@ export const Route = createFileRoute('/')({
 type Screen = 'paste' | 'charge' | 'interrogate' | 'verdict'
 
 const checkingStatusText = 'quack dev is checking your answer against the review summary.'
+const samplePr = 'https://github.com/facebook/react/pull/31277'
 
 function DuckTrialApp() {
   const [screen, setScreen] = useState<Screen>('paste')
-  const [url, setUrl] = useState('')
+  const [url, setUrl] = useState(samplePr)
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null)
   const [concepts, setConcepts] = useState<ConceptCheck[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -58,15 +59,20 @@ function DuckTrialApp() {
     setVerdict(null)
 
     try {
+      const shouldUseDemo = useDemo || url.trim() === samplePr
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, useDemo }),
+        body: JSON.stringify({ url, useDemo: shouldUseDemo }),
       })
       const payload = await response.json()
 
       if (!response.ok) {
-        throw new Error(payload.error || 'quack dev could not read that pull request.')
+        const fallbackMessage =
+          payload.error === 'fetch failed'
+            ? 'quack dev could not reach GitHub from this dev server. Use the sample PR or try again when network access is available.'
+            : 'quack dev could not read that pull request.'
+        throw new Error(payload.error && payload.error !== 'fetch failed' ? payload.error : fallbackMessage)
       }
 
       const nextAnalysis = payload as AnalysisResponse
@@ -195,7 +201,7 @@ function DuckTrialApp() {
       <header className="topbar">
         <div className="brand-lockup">
           <div className="duck-mark" aria-hidden="true">
-            qd
+            <img src="/generated-assets/rubber-duck-mascot.png" width={38} height={38} alt="" />
           </div>
           <div>
             <p className="eyebrow">quack dev</p>
@@ -221,7 +227,6 @@ function DuckTrialApp() {
           setUrl={setUrl}
           isLoading={isLoading}
           onAnalyze={() => analyzePr(false)}
-          onDemo={() => analyzePr(true)}
         />
       ) : null}
 
@@ -269,7 +274,7 @@ function DuckTrialApp() {
             setConcepts([])
             setTranscript([])
             setVerdict(null)
-            setUrl('')
+            setUrl(samplePr)
             setError('')
           }}
         />
