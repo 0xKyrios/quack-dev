@@ -11,13 +11,15 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react'
-import { useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
 import type {
   AnalysisResponse,
+  AnalysisSource,
   ChargeSheet,
   ConceptCheck,
   ConceptStatus,
+  ConnectorUsage,
   EvaluationResponse,
   VerdictResponse,
 } from '../lib/types'
@@ -44,9 +46,9 @@ const riskLabels: Record<string, string> = {
 
 const voiceStateLabels: Record<'idle' | 'connecting' | 'live' | 'fallback', string> = {
   idle: 'Voice ready',
-  connecting: 'Connecting voice',
-  live: 'Voice live',
-  fallback: 'Type instead',
+  connecting: 'Connecting…',
+  live: 'Session live',
+  fallback: 'Voice unavailable',
 }
 
 const transcriptSpeakerLabels: Record<TranscriptLine['speaker'], string> = {
@@ -54,6 +56,8 @@ const transcriptSpeakerLabels: Record<TranscriptLine['speaker'], string> = {
   developer: 'You',
   system: 'Status',
 }
+
+const checkingStatusText = 'quack dev is checking your answer against the review summary.'
 
 function DuckTrialApp() {
   const [screen, setScreen] = useState<Screen>('paste')
@@ -71,6 +75,7 @@ function DuckTrialApp() {
     'idle',
   )
   const [answerMode, setAnswerMode] = useState<'text' | 'voice'>('text')
+  const [voiceInputDraft, setVoiceInputDraft] = useState('')
   const peerRef = useRef<RTCPeerConnection | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
@@ -104,14 +109,8 @@ function DuckTrialApp() {
       setCurrentIndex(0)
       setTranscript([
         {
-          speaker: 'duck',
+          speaker: 'system',
           text: `${nextAnalysis.chargeSheet.case_title}. ${nextAnalysis.chargeSheet.charge}`,
-        },
-        {
-          speaker: 'duck',
-          text:
-            nextAnalysis.chargeSheet.concepts_to_test[0]?.question ||
-            'Explain what this PR changes and why it is safe.',
         },
       ])
       setScreen('charge')
@@ -154,16 +153,29 @@ function DuckTrialApp() {
     remoteAudioRef.current = null
   }
 
+  useEffect(() => {
+    if (screen === 'interrogate') return
+    voiceEpochRef.current += 1
+    teardownVoiceSession()
+    startVoiceInFlightRef.current = false
+    setVoiceState('idle')
+    setAnswerMode('text')
+  }, [screen])
+
   function stopVoice() {
     voiceEpochRef.current += 1
     teardownVoiceSession()
     setVoiceState('idle')
     setAnswerMode('text')
+    setVoiceInputDraft('')
   }
 
   function selectAnswerMode(mode: 'text' | 'voice') {
     if (mode === 'text') {
       stopVoice()
+      return
+    }
+    if (answerMode === 'voice' && (voiceState === 'connecting' || voiceState === 'live')) {
       return
     }
     setAnswerMode('voice')
@@ -290,8 +302,28 @@ function DuckTrialApp() {
           appendTranscript('duck', text)
         }
       }
+      if (event.type === 'conversation.item.input_audio_transcription.delta') {
+        const delta = event.delta || event.text || ''
+        if (delta) {
+          setVoiceInputDraft((draft) => `${draft}${delta}`)
+        }
+      }
       if (event.type === 'conversation.item.input_audio_transcription.completed') {
-        appendTranscript('developer', event.transcript)
+        const text = event.transcript || event.text
+        if (text) {
+          appendTranscript('developer', text)
+          setVoiceInputDraft('')
+        }
+      }
+      if (
+        event.type === 'conversation.item.input_audio_transcription.failed' ||
+        event.type === 'input_audio_buffer.speech_started'
+      ) {
+        if (event.type === 'input_audio_buffer.speech_started') {
+          setVoiceInputDraft('')
+          return
+        }
+        appendTranscript('system', 'Voice input was heard, but transcription failed. Try typing the answer.')
       }
     } catch {
       // Realtime sends many event shapes; unsupported events can be ignored for the MVP.
@@ -310,10 +342,7 @@ function DuckTrialApp() {
     const answerText = answer.trim()
     setAnswer('')
     appendTranscript('developer', answerText)
-    appendTranscript(
-      'system',
-      'quack dev is checking your answer against the review summary.',
-    )
+    appendTranscript('system', checkingStatusText)
 
     try {
       const controller = new AbortController()
@@ -339,6 +368,7 @@ function DuckTrialApp() {
       applyEvaluation(evaluation)
     } catch (caught) {
       const fallback = evaluateAnswerInBrowser(currentConcept, answerText)
+      removeCheckingStatus()
       appendTranscript(
         'system',
         caught instanceof DOMException && caught.name === 'AbortError'
@@ -352,6 +382,7 @@ function DuckTrialApp() {
   }
 
   function applyEvaluation(evaluation: EvaluationResponse) {
+    removeCheckingStatus()
     setConcepts((items) =>
       items.map((item, index) =>
         index === currentIndex
@@ -366,8 +397,13 @@ function DuckTrialApp() {
     )
     if (nextIndex >= 0) {
       setCurrentIndex(nextIndex)
-      appendTranscript('duck', concepts[nextIndex].question)
     }
+  }
+
+  function removeCheckingStatus() {
+    setTranscript((lines) =>
+      lines.filter((line) => line.speaker !== 'system' || line.text !== checkingStatusText),
+    )
   }
 
   async function issueVerdict() {
@@ -412,12 +448,12 @@ function DuckTrialApp() {
           </div>
           <div>
             <p className="eyebrow">quack dev</p>
-            <h1>Understand the pull request before you merge.</h1>
+            <p className="tagline">The rubber duck that reviews you back.</p>
           </div>
         </div>
         <div className="status-pill">
           <Radio size={16} />
-          Summary → check → review note
+          Read → explain → ship
         </div>
       </header>
 
@@ -452,12 +488,15 @@ function DuckTrialApp() {
       {screen === 'interrogate' && analysis ? (
         <InterrogationScreen
           chargeSheet={analysis.chargeSheet}
+          sources={analysis.sources}
+          connectorsUsed={analysis.connectorsUsed}
           concepts={concepts}
           currentConcept={currentConcept}
           currentIndex={currentIndex}
           board={board}
           transcript={transcript}
           answer={answer}
+          voiceInputDraft={voiceInputDraft}
           setAnswer={setAnswer}
           isEvaluating={isEvaluating}
           voiceState={voiceState}
@@ -505,13 +544,15 @@ function PasteScreen({
   onDemo: () => void
 }) {
   return (
-    <section className="hero-grid">
+    <section className="hero-grid" id="hero-grid">
       <div className="hero-copy">
         <p className="stamp">PR understanding, not review theater</p>
-        <h2>Review the change before you merge.</h2>
+        <h1>We review reviewers. What did you just approve?</h1>
         <p>
-          quack dev reads a public GitHub PR, explains the risk, then asks the
-          few questions that prove you actually understand the change.
+          You typed LGTM. But do you actually understand the change? quack dev
+          reads the PR, finds the risky parts, and asks you to explain them
+          back. Like rubber-duck debugging — except the duck asks the
+          questions.
         </p>
       </div>
 
@@ -523,8 +564,8 @@ function PasteScreen({
         }}
       >
         <div className="form-heading">
-          <h3>Start with a PR link</h3>
-          <p>Public GitHub PRs work without OAuth. The demo is tuned for a fast hackathon walkthrough.</p>
+          <h3>Paste the PR URL</h3>
+          <p id="form-help">Any public GitHub PR. The demo uses a real example.</p>
         </div>
         <label htmlFor="pr-url">Pull request URL</label>
         <input
@@ -532,31 +573,32 @@ function PasteScreen({
           data-testid="pr-url-input"
           type="url"
           placeholder="https://github.com/owner/repo/pull/123"
+          aria-describedby="form-help"
           value={url}
           onChange={(event) => setUrl(event.target.value)}
         />
         <div className="form-actions">
-          <button type="button" className="primary-button demo-button" data-testid="demo-trial" onClick={onDemo} disabled={isLoading}>
+          <button className="primary-button quiz-button" data-testid="trial-submit" disabled={isLoading}>
+            {isLoading ? <Loader2 className="spin" size={18} /> : <FileText size={18} />}
+            Explain it to the duck
+          </button>
+          <button type="button" className="ghost-button demo-button" data-testid="demo-trial" onClick={onDemo} disabled={isLoading}>
             {isLoading ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
             Try 60-sec demo
           </button>
-          <button className="ghost-button" data-testid="trial-submit" disabled={isLoading}>
-            {isLoading ? <Loader2 className="spin" size={18} /> : <FileText size={18} />}
-            Analyze my PR
-          </button>
           <button type="button" className="ghost-button" onClick={() => setUrl(samplePr)}>
-            Fill sample URL
+            Use a sample PR
           </button>
         </div>
       </form>
       <aside className="preview-panel" aria-label="Understanding checklist preview">
-        <p className="eyebrow">What judges see fast</p>
-        <div className="preview-list">
-          <span><strong>1</strong> What changed?</span>
-          <span><strong>2</strong> Why it matters</span>
-          <span><strong>3</strong> What could break?</span>
-          <span><strong>4</strong> What proof is missing?</span>
-        </div>
+        <p className="eyebrow">Can you explain these?</p>
+        <ol className="preview-list">
+          <li><strong>1</strong> What the change does</li>
+          <li><strong>2</strong> Why it matters</li>
+          <li><strong>3</strong> What could break</li>
+          <li><strong>4</strong> Where the safeguard is</li>
+        </ol>
       </aside>
     </section>
   )
@@ -626,6 +668,12 @@ function ChargeScreen({
           </div>
         </dl>
 
+        <SourcesPanel
+          sources={analysis.sources}
+          connectorsUsed={analysis.connectorsUsed}
+          compact
+        />
+
         <div className="concept-list">
           {chargeSheet.concepts_to_test.map((concept) => (
             <div className="concept-row" key={concept.id}>
@@ -655,14 +703,80 @@ function ChargeScreen({
   )
 }
 
+function SourcesPanel({
+  sources,
+  connectorsUsed,
+  compact = false,
+}: {
+  sources?: AnalysisSource[]
+  connectorsUsed?: ConnectorUsage[]
+  compact?: boolean
+}) {
+  const visibleSources = sources?.slice(0, compact ? 3 : 5) || []
+  const visibleConnectors = connectorsUsed || []
+  const smitheryUsed = visibleConnectors.filter(
+    (connector) => connector.provider === 'smithery' && connector.status === 'used',
+  ).length
+
+  return (
+    <section className={`sources-panel ${compact ? 'sources-panel-compact' : ''}`}>
+      <div className="sources-heading">
+        <Sparkles size={15} />
+        <div>
+          <p className="eyebrow">Sources</p>
+          <h3>Smithery context</h3>
+          <span className="sources-count">
+            {smitheryUsed} Smithery connector{smitheryUsed === 1 ? '' : 's'} used
+          </span>
+        </div>
+      </div>
+
+      <div className="connector-pills" aria-label="Connector usage">
+        {visibleConnectors.map((connector) => (
+          <span
+            className={`connector-pill connector-${connector.status}`}
+            key={`${connector.id}-${connector.provider}`}
+            title={connector.detail}
+          >
+            {connector.label}
+            <small>{connector.provider === 'smithery' ? 'Smithery' : connector.provider}</small>
+          </span>
+        ))}
+      </div>
+
+      {visibleSources.length ? (
+        <div className="source-list">
+          {visibleSources.map((source) => (
+            <a
+              className="source-card"
+              href={source.url}
+              key={source.id}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <strong>{source.title}</strong>
+              {source.snippet ? <span>{source.snippet}</span> : null}
+            </a>
+          ))}
+        </div>
+      ) : (
+        <p className="sources-empty">No external sources returned yet.</p>
+      )}
+    </section>
+  )
+}
+
 function InterrogationScreen({
   chargeSheet,
+  sources,
+  connectorsUsed,
   concepts,
   currentConcept,
   currentIndex,
   board,
   transcript,
   answer,
+  voiceInputDraft,
   setAnswer,
   isEvaluating,
   voiceState,
@@ -673,12 +787,15 @@ function InterrogationScreen({
   isLoading,
 }: {
   chargeSheet: ChargeSheet
+  sources: AnalysisSource[]
+  connectorsUsed: ConnectorUsage[]
   concepts: ConceptCheck[]
   currentConcept?: ConceptCheck
   currentIndex: number
   board: Record<ConceptStatus, ConceptCheck[]>
   transcript: TranscriptLine[]
   answer: string
+  voiceInputDraft: string
   setAnswer: (value: string) => void
   isEvaluating: boolean
   voiceState: 'idle' | 'connecting' | 'live' | 'fallback'
@@ -691,110 +808,12 @@ function InterrogationScreen({
   const voiceSessionActive = answerMode === 'voice' && (voiceState === 'connecting' || voiceState === 'live')
 
   return (
-    <section className="interrogation-grid">
-      <div className="duck-room">
-        <div className="answer-mode-switch" role="group" aria-label="Answer mode">
-          <button
-            type="button"
-            className={`answer-mode-tab ${answerMode === 'text' ? 'is-active' : ''}`}
-            aria-pressed={answerMode === 'text'}
-            data-testid="answer-mode-text"
-            onClick={() => onSelectAnswerMode('text')}
-          >
-            <MessageSquare size={16} strokeWidth={2.25} />
-            Type
-          </button>
-          <button
-            type="button"
-            className={`answer-mode-tab ${answerMode === 'voice' ? 'is-active' : ''}`}
-            aria-pressed={answerMode === 'voice'}
-            data-testid="answer-mode-voice"
-            onClick={() => onSelectAnswerMode('voice')}
-          >
-            <Mic size={16} strokeWidth={2.25} />
-            Voice
-          </button>
-        </div>
-
-        <div
-          className={`duck-avatar-wrap ${voiceSessionActive ? 'duck-voice-active' : ''}`}
-          aria-hidden="true"
-        >
-          {answerMode === 'voice' ? (
-            <img
-              className="duck-mascot"
-              src="/duck.svg"
-              width={88}
-              height={88}
-              alt=""
-            />
-          ) : (
-            <div className="duck-avatar">
-              <div className="duck-head" />
-              <div className="duck-beak" />
-              <div className="duck-eye" />
-            </div>
-          )}
-        </div>
-        <div className="question-block" data-testid="current-question">
-          <p className="eyebrow">Question {Math.min(currentIndex + 1, concepts.length)} of {concepts.length}</p>
-          <h2>{currentConcept?.question || 'Question ready.'}</h2>
-          <p>
-            {currentConcept?.follow_up_if_weak ||
-              'Explain the mechanism, safeguard, or test coverage.'}
-          </p>
-        </div>
-
-        <div className="typed-answer">
-          <textarea
-            data-testid="answer-input"
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            placeholder={
-              answerMode === 'voice'
-                ? 'Optional — type here if you want to submit text, or speak and use transcript + submit.'
-                : 'Explain the safeguard, mechanism, or missing test...'
-            }
-          />
-          <button
-            className="primary-button"
-            data-testid="submit-answer"
-            onClick={onSubmitAnswer}
-            disabled={isEvaluating || !answer.trim()}
-          >
-            {isEvaluating ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-            Submit answer
-          </button>
-        </div>
-
-        {answerMode === 'voice' ? (
-          <div className="voice-status-row">
-            <span className={`voice-dot ${voiceState}`}>
-              {voiceState === 'connecting' ? (
-                <Loader2 className="spin voice-dot-spinner" size={14} aria-hidden />
-              ) : null}
-              {voiceStateLabels[voiceState]}
-            </span>
-            <button type="button" className="ghost-link" onClick={() => onSelectAnswerMode('text')}>
-              Back to typing (ends voice)
-            </button>
-          </div>
-        ) : (
-          <p className="voice-hint">Tap Voice to speak with realtime quack dev — microphone access required.</p>
-        )}
-      </div>
-
-      <div className="transcript-panel">
-        <p className="eyebrow">Live notes</p>
-        <div className="transcript-log" data-testid="transcript-log">
-          {transcript.map((line, index) => (
-            <p key={`${line.speaker}-${index}`} className={`line-${line.speaker}`}>
-              <strong>{transcriptSpeakerLabels[line.speaker]}</strong>
-              {line.text}
-            </p>
-          ))}
-        </div>
-      </div>
+    <section className="interrogation-grid interrogation-grid-has-fixed-bar">
+      <UnderstandingBoard
+        board={board}
+        concepts={concepts}
+        currentConceptId={currentConcept?.id}
+      />
 
       <aside className="evidence-panel">
         <p className="eyebrow">Diff details</p>
@@ -804,13 +823,185 @@ function InterrogationScreen({
             <li key={item}>{item}</li>
           ))}
         </ul>
+        <SourcesPanel sources={sources} connectorsUsed={connectorsUsed} compact />
       </aside>
 
-      <UnderstandingBoard board={board} />
+      <div className="chat-panel">
+        <div className="chat-panel-header">
+          <div className="chat-title">
+            <div
+              className={`duck-avatar-wrap ${voiceSessionActive ? 'duck-voice-active' : ''}`}
+              aria-hidden="true"
+            >
+              {answerMode === 'voice' ? (
+                <img
+                  className="duck-mascot"
+                  src="/duck.svg"
+                  width={88}
+                  height={88}
+                  alt=""
+                />
+              ) : (
+                <div className="duck-avatar">
+                  <div className="duck-head" />
+                  <div className="duck-beak" />
+                  <div className="duck-eye" />
+                </div>
+              )}
+            </div>
+            <div>
+              <p className="eyebrow">Understanding check</p>
+              <h2>Chat through the risky parts.</h2>
+            </div>
+          </div>
 
-      <div className="verdict-bar">
+          <div className="answer-mode-switch" role="group" aria-label="Answer mode">
+            <button
+              type="button"
+              className={`answer-mode-tab ${answerMode === 'text' ? 'is-active' : ''}`}
+              aria-pressed={answerMode === 'text'}
+              data-testid="answer-mode-text"
+              onClick={() => onSelectAnswerMode('text')}
+            >
+              <MessageSquare size={16} strokeWidth={2.25} />
+              Type
+            </button>
+            <button
+              type="button"
+              className={`answer-mode-tab ${answerMode === 'voice' ? 'is-active' : ''}`}
+              aria-pressed={answerMode === 'voice'}
+              data-testid="answer-mode-voice"
+              disabled={isEvaluating || isLoading || voiceState === 'connecting'}
+              onClick={() => onSelectAnswerMode('voice')}
+            >
+              <Mic size={16} strokeWidth={2.25} />
+              Voice
+            </button>
+          </div>
+        </div>
+
+        <div className="chat-scroll">
+          <div className="transcript-panel">
+            <p className="eyebrow">Conversation</p>
+            <p className="transcript-panel-hint">Questions, answers, and model feedback in one thread.</p>
+            <div className="transcript-log" data-testid="transcript-log">
+              {transcript.every((line) => line.speaker === 'system') ? (
+                <p className="line-system transcript-empty-state">
+                  <span className="transcript-meta">
+                    <strong>Status</strong>
+                    <span>Waiting</span>
+                  </span>
+                  <span className="transcript-text">Answer the pinned question below to start the conversation.</span>
+                </p>
+              ) : null}
+              {transcript.map((line, index) => (
+                <p
+                  key={`${line.speaker}-${index}`}
+                  className={`line-${line.speaker}${line.text === checkingStatusText ? ' line-system-transient' : ''}`}
+                >
+                  <span className="transcript-meta">
+                    <strong>{transcriptSpeakerLabels[line.speaker]}</strong>
+                    <span>{line.speaker === 'duck' ? 'Assistant' : line.speaker === 'developer' ? 'Speaker' : 'System'}</span>
+                  </span>
+                  <span className="transcript-text">{line.text}</span>
+                </p>
+              ))}
+              {answer.trim() ? (
+                <p className="line-developer transcript-draft">
+                  <span className="transcript-meta">
+                    <strong>You</strong>
+                    <span>Draft</span>
+                  </span>
+                  <span className="transcript-text">{answer}</span>
+                </p>
+              ) : null}
+              {voiceInputDraft.trim() ? (
+                <p className="line-developer transcript-draft">
+                  <span className="transcript-meta">
+                    <strong>You</strong>
+                    <span>Listening</span>
+                  </span>
+                  <span className="transcript-text">{voiceInputDraft}</span>
+                </p>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="chat-composer">
+          <div className="question-block pinned-question" data-testid="current-question">
+            <p className="eyebrow">Question {Math.min(currentIndex + 1, concepts.length)} of {concepts.length}</p>
+            <h2>{currentConcept?.question || 'Question ready.'}</h2>
+            <p>
+              {currentConcept?.follow_up_if_weak ||
+                'Explain the mechanism, safeguard, or test coverage.'}
+            </p>
+          </div>
+
+          {answerMode === 'voice' ? (
+            <div className="voice-status-row">
+              <span
+                className={`voice-dot ${voiceState}${voiceState === 'live' ? ' voice-dot-pulse' : ''}`}
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {voiceState === 'live' ? (
+                  <Fragment>
+                    <span className="voice-live-dot" aria-hidden />
+                    <span className="voice-wave-meter" aria-hidden>
+                      <span />
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  </Fragment>
+                ) : null}
+                {voiceState === 'connecting' ? (
+                  <Loader2 className="spin voice-dot-spinner" size={14} aria-hidden />
+                ) : null}
+                <span className="voice-dot-label">{voiceStateLabels[voiceState]}</span>
+              </span>
+              <button
+                type="button"
+                className="ghost-link"
+                title="Switch to typing and close the voice session"
+                onClick={() => onSelectAnswerMode('text')}
+              >
+                End voice
+              </button>
+            </div>
+          ) : (
+            <p className="voice-hint">Tap Voice to speak with realtime quack dev — microphone access required.</p>
+          )}
+
+          <div className="typed-answer">
+            <textarea
+              data-testid="answer-input"
+              value={answer}
+              onChange={(event) => setAnswer(event.target.value)}
+              placeholder={
+                answerMode === 'voice'
+                  ? 'Optional — type here if you want to submit text, or speak and use transcript + submit.'
+                  : 'Explain the safeguard, mechanism, or missing test...'
+              }
+            />
+            <button
+              className="primary-button"
+              data-testid="submit-answer"
+              onClick={onSubmitAnswer}
+              disabled={isEvaluating || !answer.trim()}
+            >
+              {isEvaluating ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+              Submit answer
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="verdict-bar verdict-bar-fixed">
         <button
-          className="primary-button"
+          className="primary-button verdict-bar-action"
           data-testid="issue-verdict"
           onClick={onVerdict}
           disabled={isLoading || isEvaluating}
@@ -823,11 +1014,44 @@ function InterrogationScreen({
   )
 }
 
-function UnderstandingBoard({ board }: { board: Record<ConceptStatus, ConceptCheck[]> }) {
+function UnderstandingBoard({
+  board,
+  concepts,
+  currentConceptId,
+}: {
+  board: Record<ConceptStatus, ConceptCheck[]>
+  concepts: ConceptCheck[]
+  currentConceptId?: string
+}) {
   const understood = board.passed.length
-  const needsWork = board.failed.length + board.weak.length
-  const total = understood + needsWork + board.unverified.length
+  const failed = board.failed.length
+  const weak = board.weak.length
+  const needsWork = failed + weak
+  const queued = board.unverified.length
+  const total = understood + needsWork + queued
   const progress = total ? Math.round((understood / total) * 100) : 0
+
+  const conceptOrderIdx = useMemo(() => {
+    const m = new Map<string, number>()
+    concepts.forEach((c, i) => m.set(c.id, i))
+    return m
+  }, [concepts])
+
+  const sortByConceptOrder = (items: ConceptCheck[]) =>
+    [...items].sort(
+      (a, b) => (conceptOrderIdx.get(a.id) ?? 0) - (conceptOrderIdx.get(b.id) ?? 0),
+    )
+
+  const unverifiedSorted = sortByConceptOrder(board.unverified)
+  const activeConcept =
+    currentConceptId != null
+      ? concepts.find((c) => c.id === currentConceptId && c.status === 'unverified')
+      : undefined
+
+  function ordinalFor(id: string) {
+    const i = concepts.findIndex((c) => c.id === id)
+    return i >= 0 ? i + 1 : null
+  }
 
   return (
     <aside className="board-panel" data-testid="understanding-board">
@@ -837,34 +1061,115 @@ function UnderstandingBoard({ board }: { board: Record<ConceptStatus, ConceptChe
         <div className="progress-track">
           <span style={{ width: `${progress}%` }} />
         </div>
-        <small>{needsWork ? `${needsWork} needs more detail` : 'Answer each concept to unlock a clean review note.'}</small>
+        <small className="progress-card-meta">
+          {queued ? `${queued} in queue · ` : ''}
+          {needsWork ? `${needsWork} need follow-up · ` : ''}
+          Unlock a solid review note by clearing each concept.
+        </small>
       </div>
-      <BoardGroup label="Clear" items={board.passed} status="passed" />
-      <BoardGroup label="Needs more detail" items={[...board.failed, ...board.weak]} status="failed" />
-      <BoardGroup label="Not answered yet" items={board.unverified} status="unverified" />
+
+      {activeConcept ? (
+        <div className="board-active-card" aria-live="polite">
+          <p className="eyebrow board-active-eyebrow">Active check</p>
+          <div className="board-active-head">
+            <span className="board-idx">{ordinalFor(activeConcept.id)}</span>
+            <strong className="board-active-title">{activeConcept.concept}</strong>
+            <span className={`board-sev sev-${activeConcept.severity}`}>
+              {riskLabels[activeConcept.severity] || activeConcept.severity}
+            </span>
+          </div>
+          <p className="board-active-question">{activeConcept.question}</p>
+        </div>
+      ) : null}
+
+      {board.passed.length ? (
+        <BoardGroup label="Clear" items={sortByConceptOrder(board.passed)} status="passed" ordinalFor={ordinalFor} />
+      ) : null}
+
+      {board.failed.length ? (
+        <BoardGroup
+          label="Blocked"
+          subtitle="Explain before merging"
+          items={sortByConceptOrder(board.failed)}
+          status="failed"
+          ordinalFor={ordinalFor}
+        />
+      ) : null}
+
+      {board.weak.length ? (
+        <BoardGroup
+          label="Shaky"
+          subtitle="Add mechanism, invariant, or test"
+          items={sortByConceptOrder(board.weak)}
+          status="weak"
+          ordinalFor={ordinalFor}
+        />
+      ) : null}
+
+      <BoardGroup
+        label={queued ? 'Up next' : 'All caught up'}
+        items={unverifiedSorted}
+        status="unverified"
+        ordinalFor={ordinalFor}
+        currentConceptId={currentConceptId}
+        showQuestionTeaser={queued > 0}
+        emptyHint={queued ? undefined : 'Every concept in this trial has been checked.'}
+      />
     </aside>
   )
 }
 
 function BoardGroup({
   label,
+  subtitle,
   items,
   status,
+  ordinalFor,
+  currentConceptId,
+  showQuestionTeaser,
+  emptyHint,
 }: {
   label: string
+  subtitle?: string
   items: ConceptCheck[]
   status: ConceptStatus
+  ordinalFor?: (id: string) => number | null
+  currentConceptId?: string
+  showQuestionTeaser?: boolean
+  emptyHint?: string
 }) {
   return (
     <div className="board-group">
       <h4>{label}</h4>
+      {subtitle ? <p className="board-group-sub">{subtitle}</p> : null}
       {items.length ? (
-        items.map((item) => (
-          <div className={`board-item status-${status}`} key={item.id}>
-            <span>{item.concept}</span>
-            {item.reason ? <small>{item.reason}</small> : null}
-          </div>
-        ))
+        items.map((item) => {
+          const n = ordinalFor?.(item.id)
+          const teaser =
+            showQuestionTeaser && item.question && item.question.length > 118
+              ? `${item.question.slice(0, 115)}…`
+              : item.question
+          return (
+            <div
+              className={`board-item status-${status} ${item.id === currentConceptId ? 'is-current' : ''}`}
+              key={item.id}
+            >
+              <div className="board-item-top">
+                {n != null ? <span className="board-idx">{n}</span> : null}
+                <span className="board-concept-name">{item.concept}</span>
+                <span className={`board-sev sev-${item.severity}`}>
+                  {riskLabels[item.severity] ?? item.severity}
+                </span>
+              </div>
+              {showQuestionTeaser && teaser ? (
+                <p className="board-teaser">{teaser}</p>
+              ) : null}
+              {item.reason ? <small className="board-reason">{item.reason}</small> : null}
+            </div>
+          )
+        })
+      ) : emptyHint ? (
+        <p className="empty-state">{emptyHint}</p>
       ) : (
         <p className="empty-state">None yet.</p>
       )}

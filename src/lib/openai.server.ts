@@ -1,5 +1,6 @@
 import { chargeSheetSchema, compactSnapshot, normalizeChargeSheet } from './analysis'
 import type {
+  AnalysisSource,
   ChargeSheet,
   ConceptCheck,
   EvaluationResponse,
@@ -58,7 +59,10 @@ async function callResponsesApi(body: Record<string, unknown>, timeoutMs = 45000
   }
 }
 
-export async function analyzePrWithOpenAi(snapshot: PrSnapshot): Promise<ChargeSheet> {
+export async function analyzePrWithOpenAi(
+  snapshot: PrSnapshot,
+  sources: AnalysisSource[] = [],
+): Promise<ChargeSheet> {
   const payload = await callResponsesApi({
     model: analysisModel,
     input: [
@@ -72,12 +76,18 @@ export async function analyzePrWithOpenAi(snapshot: PrSnapshot): Promise<ChargeS
         content: JSON.stringify({
           instructions: [
             'Inspect this public GitHub PR snapshot.',
+            'Use the external risk context only when it is directly relevant to the diff.',
             'Find risky or confusing changes.',
             'Prefer concepts involving retry logic, payment/billing, auth/session, database migrations, permissions/security, concurrency/race conditions, caching, background jobs, deletion/destructive changes, missing tests, and env/config changes.',
             'Write questions that force the developer to explain mechanisms, invariants, and evidence.',
             'Return only JSON matching the schema.',
           ],
           pr: compactSnapshot(snapshot),
+          external_risk_context: sources.map((source) => ({
+            title: source.title,
+            url: source.url,
+            snippet: source.snippet,
+          })),
         }),
       },
     ],
@@ -261,6 +271,11 @@ export async function createRealtimeSession(chargeSheet: ChargeSheet) {
     body: JSON.stringify({
       model: realtimeModel,
       voice: process.env.OPENAI_REALTIME_VOICE || 'verse',
+      input_audio_transcription: {
+        model: process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe',
+        prompt:
+          'Transcribe concise software engineering discussion about pull requests, payment retries, idempotency keys, tests, and code review.',
+      },
       instructions: [
         'You are the quack dev understanding-check duck.',
         'You review human understanding, not just code.',

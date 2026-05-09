@@ -117,4 +117,29 @@ export const demoAnalysis: AnalysisResponse = {
   pr: demoPrSnapshot,
   chargeSheet: demoChargeSheet,
   usedFallback: true,
+  sources: [
+    {
+      id: 'demo-github-pr',
+      title: 'Demo payment retry pull request',
+      url: demoPrSnapshot.htmlUrl,
+      snippet: 'Local demo snapshot showing a timed-out payment retry without idempotency proof.',
+      provider: 'demo',
+    },
+  ],
+  connectorsUsed: [
+    {
+      id: 'demo-github',
+      label: 'GitHub PR snapshot',
+      provider: 'fallback',
+      status: 'used',
+      detail: 'Demo data',
+    },
+    {
+      id: 'demo-exa',
+      label: 'Exa risk context',
+      provider: 'fallback',
+      status: 'skipped',
+      detail: 'Skipped for demo mode',
+    },
+  ],
 }

@@ -37,6 +37,22 @@ export type PrSnapshot = {
   commits: PrCommit[]
 }
 
+export type AnalysisSource = {
+  id: string
+  title: string
+  url?: string
+  snippet?: string
+  provider: 'github' | 'exa' | 'demo' | 'fallback'
+}
+
+export type ConnectorUsage = {
+  id: string
+  label: string
+  provider: 'smithery' | 'direct' | 'fallback'
+  status: 'used' | 'skipped' | 'failed'
+  detail?: string
+}
+
 export type ConceptCheck = {
   id: string
   concept: string
@@ -61,6 +77,8 @@ export type AnalysisResponse = {
   pr: PrSnapshot
   chargeSheet: ChargeSheet
   usedFallback: boolean
+  sources: AnalysisSource[]
+  connectorsUsed: ConnectorUsage[]
 }
 
 export type EvaluationResponse = {
